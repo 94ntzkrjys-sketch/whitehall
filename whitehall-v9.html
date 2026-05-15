@@ -1,0 +1,1424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Whitehall — Prototype v0.9</title>
+  <!-- React 18 + Babel (transpiles JSX in the browser — no build step needed) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.3/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a1208; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #0a1208; }
+    ::-webkit-scrollbar-thumb { background: #1a341a; border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // ── Constants ────────────────────────────────────────────────────────────────
+    const START              = new Date(2025, 0, 6);
+    const TOTAL_DAYS         = 81;
+    const STAGE_WORK         = 5;
+    const TRANSIT_IDLE       = 1;
+    const TRANSIT_SWAP       = 2;
+    const TICK_MS            = 22000;
+    const ARRIVAL_MIN        = 9;
+    const ARRIVAL_MAX        = 14;
+    const RECLASSIFY_P       = 0.012;
+    const INBOX_CAP          = 6;
+    const LOCUM_COST         = 20;
+    const LOCUM_DURATION     = 14;
+    const SUPPORT_FACTOR     = 0.5;
+    const MEETING_INTERVAL   = 30;
+    const STEER_INT_MIN      = 12;
+    const STEER_INT_MAX      = 20;
+    const SPAD_INT_MIN       = 14;
+    const SPAD_INT_MAX       = 22;
+    const SPAD_EXPIRY        = 14;
+    const LIVE_DECAY         = 5;
+    const LIVE_DECAY_PERIOD  = 15;
+    const LIVE_DRAIN_PERIOD  = 10;
+    const LIVE_TOPUP_PERIOD  = 10;
+    const LIVE_MONITOR_WT    = 0.25;
+    const LIVE_ISSUE_HEALTH  = 20;
+    const LIVE_ISSUE_RESET   = 45;
+    const LIVE_RECOVER_AT    = 65;
+
+    const POOL = [
+      "Digital ID Card Rollout","HS3 Rail Extension","Universal Credit Reform",
+      "Online Safety Amendment","Green Homes Grant Revival","AI Governance Review",
+      "Levelling Up Zone 3B","Net Zero Standards","Childcare Expansion Scheme",
+      "Offshore Wind Mandate","Social Care Funding Reform","Planning Reform White Paper",
+      "Post-Brexit Fisheries Review","Smart Motorways Safety Review","RAAC Schools Survey",
+    ];
+
+    const STAGES      = ["Research","Development","Sign-Off","Implementation"];
+    const STAGE_SHORT = ["Research","Develop.","Sign-Off","Impl."];
+
+    const CONDITIONS = {
+      HOT_POTATO:    { id:"HOT_POTATO",    label:"Hot Potato",            color:"#e74c3c",
+        desc:"Politically radioactive. −3 Confidence every 5 days while in inbox." },
+      RED_TAPE:      { id:"RED_TAPE",      label:"Red Tape Special",       color:"#3498db",
+        desc:"Buried in procedure. Lawyer required at every stage." },
+      CONSULTATION:  { id:"CONSULTATION",  label:"Consultation Avalanche", color:"#f39c12",
+        desc:"47 stakeholders to placate. Stakeholder Mgr must complete Research before advancing." },
+      MINISTERS_PET: { id:"MINISTERS_PET", label:"Minister's Pet",         color:"#2ecc71",
+        desc:"The Minister is invested. −3 Confidence every 4 days after 10 Feb if unresolved." },
+    };
+
+    const STAFF_DEFS = [
+      { id:"s1", name:"Sarah Chen",     type:"Policy Officer",  initials:"SC" },
+      { id:"s2", name:"James Wright",   type:"Policy Officer",  initials:"JW" },
+      { id:"s3", name:"Emma Davies",    type:"Lawyer",          initials:"ED" },
+      { id:"s4", name:"Tom Okafor",     type:"Data Analyst",    initials:"TO" },
+      { id:"s5", name:"Priya Sharma",   type:"Stakeholder Mgr", initials:"PS" },
+      { id:"s6", name:"Mark Henderson", type:"Delivery Mgr",    initials:"MH" },
+    ];
+
+    const CAPACITY = {
+      "Policy Officer":  4,
+      "Lawyer":          3,
+      "Data Analyst":    3,
+      "Stakeholder Mgr": 3,
+      "Delivery Mgr":    3,
+    };
+
+    const MINISTER = {
+      name:"Robert Hartley MP", title:"Secretary of State",
+      initials:"RH", trait:"Anxious", concern:"Tabloid coverage",
+    };
+    const SPAD = {
+      name:"Jess Mehta", role:"Senior SpAd",
+      initials:"JM", trait:"Ambitious", push:"Digital-first agenda",
+    };
+
+    const SUBMISSION_TONES = {
+      FRANK:      { label:"Frank",      desc:"Be honest about risks and costs. HMT will respect the rigour.",
+        confidence:-3, trust:+5,
+        result:"Filed candidly. The Minister appreciates the honesty.",
+        htmWeights:{ approved:0.58, within:0.27, rejected:0.15 } },
+      REASSURING: { label:"Reassuring", desc:"Downplay difficulties. The Minister wants confidence.",
+        confidence:+5, trust:-2,
+        result:"Filed reassuringly. The Minister is pleased.",
+        htmWeights:{ approved:0.32, within:0.53, rejected:0.15 } },
+      CAUTIOUS:   { label:"Cautious",   desc:"Hedge carefully. Commit to nothing.",
+        confidence:+1, trust:+1,
+        result:"Filed cautiously. Nothing to remark upon.",
+        htmWeights:{ approved:0.44, within:0.38, rejected:0.18 } },
+    };
+
+    const HMT_TEXT = {
+      approved: (name, amt) =>
+        `HM Treasury has reviewed the business case for ${name}. The programme has been approved and a resource allocation of £${amt}m has been notified to the department. You may proceed to implementation.`,
+      within: (name) =>
+        `HM Treasury notes the submission on ${name}. Given the department's existing programme provision, Ministers have requested that this be delivered within current resources. No additional allocation will be made. You may proceed.`,
+      rejected_0: () =>
+        `HM Treasury has significant concerns about the evidence base for this programme. The business case has been returned. Additional analysis will be required before a further submission can be made.`,
+      rejected_1: () =>
+        `HM Treasury is not satisfied with the value for money analysis in this submission. The case has been returned to the development stage for further work on the options appraisal.`,
+      rejected_2: () =>
+        `HM Treasury has minor concerns about the delivery assumptions. The case has been returned for revision. These should be addressed before resubmission.`,
+    };
+
+    function calcCosts(policy) {
+      if (!policy.condition) return { impl:12, run:2 };
+      if (policy.condition.id === "HOT_POTATO")    return { impl:22, run:3 };
+      if (policy.condition.id === "MINISTERS_PET") return { impl:14, run:2 };
+      return { impl:18, run:2 };
+    }
+
+    function calculateHMT(policy) {
+      const tone = policy.submissions.signoff || "CAUTIOUS";
+      const w = SUBMISSION_TONES[tone].htmWeights;
+      const r = Math.random();
+      let response;
+      if      (r < w.approved)              response = "approved";
+      else if (r < w.approved + w.within)   response = "within";
+      else                                   response = "rejected";
+      let rejectedTo = null;
+      if (response === "rejected") {
+        const rr = Math.random();
+        if      (rr < 0.15) rejectedTo = 0;
+        else if (rr < 0.50) rejectedTo = 1;
+        else                rejectedTo = 2;
+      }
+      const { impl } = calcCosts(policy);
+      return { response, rejectedTo, amount: impl };
+    }
+
+    function steerForState(policies) {
+      const hots = policies.filter(p => p.condition?.id === "HOT_POTATO");
+      const r = Math.random();
+      if (hots.length > 0 && r < 0.5) {
+        const p = pick(hots);
+        return {
+          subtype:"hotpotato", policyId:p.id,
+          text:`I've been reading the briefing on ${p.name} and I'm not comfortable. The Mail are sniffing around. Where are we?`,
+          options:[
+            { label:"Reassure with detail",  confidence:+6, trust: 0, log:`Briefed the Minister thoroughly on ${p.name}.` },
+            { label:"Acknowledge concerns",  confidence:+2, trust: 0, log:`Acknowledged the Minister's concerns on ${p.name}.` },
+            { label:"Push back firmly",      confidence:-3, trust:+3, log:`Pushed back on ministerial concerns — the policy is sound.` },
+          ],
+        };
+      }
+      if (policies.length > 0 && r < 0.85) {
+        const p = pick(policies);
+        return {
+          subtype:"check", policyId:p.id,
+          text:`Quick one — I had a question on ${p.name} at Cabinet. Where are we with it?`,
+          options:[
+            { label:"Brief properly",        confidence:+4, trust: 0, log:`Sent a full update note on ${p.name}.` },
+            { label:"Verbal summary",        confidence:+1, trust: 0, log:`Gave a verbal summary on ${p.name}.` },
+            { label:"Apologise — too busy",  confidence:-2, trust: 0, log:`Could not brief the Minister on ${p.name} in time.` },
+          ],
+        };
+      }
+      return {
+        subtype:"generic", policyId:null,
+        text:`I had dinner with a journalist yesterday. They were asking pointed questions about the department. Are we on top of things?`,
+        options:[
+          { label:"Run through the portfolio",   confidence:+3, trust: 0, log:"Walked the Minister through the portfolio." },
+          { label:"Reassure briefly",            confidence:+1, trust: 0, log:"Reassured the Minister briefly." },
+          { label:"Suggest they speak to comms", confidence:-1, trust: 0, log:"Suggested the Minister speak to the comms team." },
+        ],
+      };
+    }
+
+    function spadIntervention(policies, day) {
+      if (policies.length === 0) return null;
+      const p = pick(policies);
+      const r = Math.random();
+      if (r < 0.35) return {
+        id:`spad-${day}`, policyId:p.id, expires:day+SPAD_EXPIRY,
+        text:`Hey — any chance we add a digital element to ${p.name}? Would play well with under-40s.`,
+        options:[
+          { label:"Accept",   confidence:+2, trust:-2, log:`Agreed to JM's digital framing for ${p.name}.` },
+          { label:"Deflect",  confidence: 0, trust: 0, log:`Deflected JM on ${p.name}.` },
+          { label:"Escalate", confidence:-4, trust:+1, log:`Escalated JM's request to the Perm Sec.`, reducesFuture:true },
+        ],
+      };
+      if (r < 0.7) return {
+        id:`spad-${day}`, policyId:p.id, expires:day+SPAD_EXPIRY,
+        text:`Conference is coming up. Is there any way to get an announcement on ${p.name} before then?`,
+        options:[
+          { label:"We'll try", confidence:+3, trust:-2, log:`Committed to accelerating ${p.name} for conference.` },
+          { label:"Deflect",   confidence: 0, trust: 0, log:`Deflected JM's conference push on ${p.name}.` },
+          { label:"Escalate",  confidence:-4, trust:+1, log:`Escalated JM's conference push to Perm Sec.`, reducesFuture:true },
+        ],
+      };
+      return {
+        id:`spad-${day}`, policyId:p.id, expires:day+SPAD_EXPIRY,
+        text:`I had lunch with the Treasury SpAds. They say ${p.name} could be a real win if we frame it right.`,
+        options:[
+          { label:"Engage",  confidence:+2, trust:-1, log:`Engaged with JM's framing of ${p.name}.` },
+          { label:"Deflect", confidence: 0, trust: 0, log:`Deflected JM on ${p.name}.` },
+          { label:"Escalate",confidence:-4, trust:+1, log:`Escalated JM's framing to Perm Sec.`, reducesFuture:true },
+        ],
+      };
+    }
+
+    function meetingLines(policies, res, completed) {
+      let dConf = 0; const lines = [];
+      if (completed >= 3) { lines.push(`"Good to see real progress — ${completed} policies through the system."`); dConf += 4; }
+      const hots = policies.filter(p => p.condition?.id === "HOT_POTATO").length;
+      if (hots >= 2)     { lines.push(`"I'm uneasy about how many flashpoints we're carrying. Be careful."`); dConf -= 5; }
+      else if (hots===1) { lines.push(`"Keep me close on the sensitive one. No surprises."`); dConf -= 1; }
+      const stalled = policies.filter(p => p.stage > 0 && p.progress < 10).length;
+      if (stalled >= 2)  { lines.push(`"Why are so many of these stuck? Let's talk about resourcing."`); dConf -= 4; }
+      if (res.adminBudget < 30 || res.programmeBudget < 30) {
+        lines.push(`"The Permanent Secretary mentioned the budget situation. Get a grip on it."`); dConf -= 3;
+      }
+      if (res.trust > 75) { lines.push(`"The select committee was rather complimentary, I gather."`); dConf += 3; }
+      if (lines.length === 0) { lines.push(`"Steady week. Keep me informed."`); dConf += 1; }
+      return { dConf, lines };
+    }
+
+    const EVENTS = [
+      { text:"FOI request filed by a tabloid journalist.",  tag:"−5 Trust",        fn:r=>({...r,trust:cl(r.trust-5)}) },
+      { text:"Treasury announces an efficiency review.",    tag:"−8 Admin Budget", fn:r=>({...r,adminBudget:cl(r.adminBudget-8)}) },
+      { text:"Select Committee commends the department.",   tag:"+6 Confidence",   fn:r=>({...r,confidence:cl(r.confidence+6)}) },
+      { text:"Positive write-up in civil service gazette.", tag:"+6 Trust",        fn:r=>({...r,trust:cl(r.trust+6)}) },
+      { text:"Underspend returned from last quarter.",      tag:"+10 Programme",   fn:r=>({...r,programmeBudget:cl(r.programmeBudget+10)}) },
+    ];
+
+    const OUTCOMES = {
+      won: [
+        "You cleared the policy backlog before Parliamentary recess. A letter of commendation has been placed in your personnel file.",
+        "Seven policies completed on time. The Minister acknowledged your department's work in a written statement to Parliament. You were not mentioned by name.",
+        "An outstanding result. The Permanent Secretary has noted your performance. This note will be factored into your next pay review, which has been frozen.",
+        "Policies completed ahead of schedule. You have been asked to share your learnings at a cross-government away day in Solihull.",
+      ],
+      deadline: [
+        "Parliamentary recess arrived with the policy backlog unresolved. You have been asked to produce a lessons-learned report. It will not be read.",
+        "The Minister has departed for the recess. Your unfinished policies will be picked up by your successor, who will receive the credit.",
+        "Time expired. Your department has been merged with three others. Your new title is Head of Strategic Coordination (Interim).",
+        "Recess arrived. The policies have been rolled forward to the next parliamentary term. You have been asked to 'take some time to reflect'.",
+      ],
+      admin: [
+        "Admin budget depleted. The department cannot meet payroll. Half the staff have been redeployed to a cross-cutting initiative with no return date.",
+        "You ran out of money for salaries. HR has begun what they're calling a 'right-sizing exercise'. You are not in the right size.",
+        "Admin overspend triggered a Treasury intervention. A spending controller has been installed in the corner office. They do not say hello.",
+        "The department cannot afford itself. You have been asked to lead a transformation programme. The transformation is mostly redundancies.",
+      ],
+      programme: [
+        "Programme budget exhausted. The policies you couldn't fund have been quietly removed from the forward plan.",
+        "Funding ran out before delivery. The Minister has announced a 'pause and reflect' phase. The phase is permanent.",
+        "Without programme funds, your policies became aspirations. The aspirations have been added to next year's manifesto consultation.",
+        "Programme budget exhausted. The National Audit Office is interested. The Public Accounts Committee is very interested.",
+      ],
+      confidence: [
+        "Ministerial confidence collapsed. You have been moved to a strategic advisory role with no portfolio and no staff.",
+        "The Minister has lost confidence in the department. You have been seconded to the Cabinet Office to work on cross-cutting priorities. There are no cross-cutting priorities.",
+        "You have been featured in a SpAd's WhatsApp group. The messages are not complimentary. You have been asked to take some leave.",
+        "A reshuffle has created a new Minister who has 'full confidence' in a replacement. Your P45 is in the post.",
+      ],
+      trust: [
+        "Public trust is exhausted. A public inquiry has been announced into your department's handling of policy.",
+        "The department's reputation has collapsed. You have been asked to lead a review of the department's communications strategy.",
+        "Trust has fallen below acceptable levels. A taskforce has been assembled to rebuild public confidence. You are not on it.",
+        "A Channel 4 documentary crew has been given access to the department. You are referred to throughout as 'a senior official'.",
+      ],
+    };
+
+    const cl   = n => Math.max(0, Math.min(100, n));
+    const pick = a => a[Math.floor(Math.random() * a.length)];
+    let _uid   = 0;
+
+    function fmtDate(day) {
+      const d = new Date(START);
+      d.setDate(d.getDate() + day);
+      return d.toLocaleDateString("en-GB", { day:"numeric", month:"short", year:"numeric" });
+    }
+
+    function policyWeight(p) { return p.condition ? 2 : 1; }
+
+    function essentialType(policy, stage) {
+      if (policy.condition?.id === "RED_TAPE") return "Lawyer";
+      switch (stage) {
+        case 0:
+          if (policy.condition?.id === "CONSULTATION" && !policy.consulted) return "Stakeholder Mgr";
+          return "Data Analyst";
+        case 1: return "Policy Officer";
+        case 2: return "Lawyer";
+        case 3: return "Delivery Mgr";
+        default: return "Policy Officer";
+      }
+    }
+
+    function isEssentialNow(staffType, policy) {
+      return essentialType(policy, policy.stage) === staffType;
+    }
+
+    function assignmentWeight(staffType, policy) {
+      const w = policyWeight(policy);
+      if (staffType === "Policy Officer" && !isEssentialNow(staffType, policy)) return w * SUPPORT_FACTOR;
+      return w;
+    }
+
+    function staffLoad(st, policies) {
+      return st.assignments.reduce((sum, a) => {
+        if (a.isMonitoring) return sum + LIVE_MONITOR_WT;
+        const p = policies.find(pp => pp.id === a.policyId);
+        if (!p) return sum;
+        return sum + assignmentWeight(st.type, p);
+      }, 0);
+    }
+
+    function findHandler(type, staff, policy, policies) {
+      const w = assignmentWeight(type, policy);
+      const cands = staff.filter(s => s.type === type);
+      cands.sort((a, b) => staffLoad(a, policies) - staffLoad(b, policies));
+      for (const c of cands) {
+        if (staffLoad(c, policies) + w <= CAPACITY[c.type]) return c;
+      }
+      return null;
+    }
+
+    function findHandlerForced(type, staff, policies) {
+      const cands = staff.filter(s => s.type === type);
+      if (!cands.length) return null;
+      cands.sort((a, b) => staffLoad(a, policies) - staffLoad(b, policies));
+      return cands[0];
+    }
+
+    function findSupportPO(policy, staff, policies) {
+      const w = policyWeight(policy) * SUPPORT_FACTOR;
+      const cands = staff.filter(s =>
+        s.type === "Policy Officer" &&
+        !s.assignments.some(a => a.policyId === policy.id));
+      cands.sort((a, b) => staffLoad(a, policies) - staffLoad(b, policies));
+      for (const c of cands) {
+        if (staffLoad(c, policies) + w <= CAPACITY[c.type]) return c;
+      }
+      return null;
+    }
+
+    function tryAddSupportPO(policy, staff, policies) {
+      const s = findSupportPO(policy, staff, policies);
+      if (!s) return false;
+      s.assignments.push({ policyId: policy.id, transit: TRANSIT_IDLE, isSupport: true });
+      return true;
+    }
+
+    function ensurePOCoverage(staff, policies) {
+      const next = staff.map(s => ({ ...s, assignments: [...s.assignments] }));
+      policies.forEach(pol => {
+        const hasPO = next.some(s => s.type === "Policy Officer" && s.assignments.some(a => a.policyId === pol.id));
+        if (!hasPO) {
+          const po = findHandlerForced("Policy Officer", next, policies);
+          if (po) po.assignments.push({ policyId: pol.id, transit: TRANSIT_IDLE });
+        }
+      });
+      return next;
+    }
+
+    function computeRouting(policy, staff, policies) {
+      const simStaff = staff.map(s => ({ ...s, assignments: s.assignments.filter(a => a.policyId !== policy.id) }));
+      const poCands  = simStaff.filter(s => s.type === "Policy Officer");
+      poCands.sort((a, b) => staffLoad(a, policies) - staffLoad(b, policies));
+      const constantPO = poCands[0] || null;
+      if (constantPO) simStaff.find(s => s.id === constantPO.id).assignments.push({ policyId: policy.id, transit: 0 });
+
+      const route = [];
+      for (let stage = 0; stage <= 3; stage++) {
+        const simPol = { ...policy, stage, consulted: stage > 0 || policy.consulted };
+        const essType = essentialType(simPol, stage);
+        let essential = essType === "Policy Officer" ? constantPO
+          : findHandler(essType, simStaff, simPol, policies);
+        if (essential && essType !== "Policy Officer") {
+          simStaff.find(s => s.id === essential.id).assignments.push({ policyId: policy.id, transit: 0 });
+        }
+        route.push({
+          stage, essType, essential,
+          support: constantPO && essential && constantPO.id !== essential.id ? constantPO : null,
+        });
+      }
+      return route;
+    }
+
+    function mkPol(name, condition, stage = 0, progress = 0, consulted = false, submissions = null, supportConfig = null) {
+      return {
+        id:`p${_uid++}`, name, condition, stage, progress, consulted,
+        submissions: submissions || { development: null, signoff: null },
+        supportConfig: supportConfig || [false, false, false, false],
+        awaitingHMT: false,
+      };
+    }
+
+    function randomPolicy() {
+      const cond = Math.random() < 0.45 ? pick(Object.values(CONDITIONS)) : null;
+      return mkPol(pick(POOL), cond);
+    }
+
+    function startingPortfolio() {
+      return [
+        mkPol(POOL[0], null, 0, 0),
+        mkPol(POOL[1], null, 0, 0),
+      ];
+    }
+
+    function autoAssignAll(policies, freshStaff) {
+      let staff = freshStaff.map(s => ({ ...s, assignments: [] }));
+      policies.forEach(pol => {
+        const po = findHandlerForced("Policy Officer", staff, policies);
+        if (po) po.assignments.push({ policyId: pol.id, transit: 0 });
+      });
+      policies.forEach(pol => {
+        const essType = essentialType(pol, pol.stage);
+        if (essType === "Policy Officer") return;
+        const h = findHandler(essType, staff, pol, policies);
+        if (h) h.assignments.push({ policyId: pol.id, transit: 0 });
+      });
+      return staff;
+    }
+
+    function needsSubmission(pol) {
+      if (pol.stage === 1 && !pol.submissions.development) return "development";
+      if (pol.stage === 2 && !pol.submissions.signoff)     return "signoff";
+      return null;
+    }
+
+    function init() {
+      _uid = 0;
+      const pols  = startingPortfolio();
+      const staff = autoAssignAll(pols, STAFF_DEFS);
+      return {
+        day:           0,
+        speed:         "pause",
+        res:           { adminBudget:75, capitalBudget:50, programmeBudget:80, confidence:80, trust:70 },
+        policies:      pols,
+        staff,
+        livePortfolio: [],
+        completed:     0,
+        log: [{ text:"Digital Delivery Unit opened. Two intake policies have arrived. Assign staff and review before pressing Play.", type:"intro" }],
+        selected:      null,
+        nextEvent:     12,
+        nextHot:       5,
+        nextPet:       999,
+        nextArrival:   7 + Math.floor(Math.random() * 5),
+        nextMeeting:   MEETING_INTERVAL,
+        nextSteer:     STEER_INT_MIN + Math.floor(Math.random() * (STEER_INT_MAX - STEER_INT_MIN)),
+        nextSpad:      SPAD_INT_MIN  + Math.floor(Math.random() * (SPAD_INT_MAX  - SPAD_INT_MIN)),
+        modalQueue:    [],
+        activeModal:   null,
+        spadNotifs:    [],
+        spadEscalations: 0,
+        gameOver:      false,
+        outcome:       null,
+        outcomeMsg:    "",
+      };
+    }
+
+    function advanceToImpl(pol, staff, pols, day) {
+      staff.forEach(st => {
+        if (st.type !== "Policy Officer") {
+          st.assignments = st.assignments.filter(a => a.policyId !== pol.id);
+        } else {
+          st.assignments = st.assignments.filter(a => a.policyId !== pol.id || !a.isSupport);
+        }
+      });
+      pol.awaitingHMT = false;
+      pol.stage       = 3;
+      pol.progress    = 0;
+      const h = findHandler("Delivery Mgr", staff, pol, pols);
+      if (h) h.assignments.push({ policyId: pol.id, transit: TRANSIT_IDLE });
+      if (pol.supportConfig[3]) tryAddSupportPO(pol, staff, pols);
+    }
+
+    function tick(s) {
+      if (s.gameOver || s.activeModal) return s;
+
+      const day = s.day + 1;
+      let res   = { ...s.res };
+      let staff = s.staff.map(st => ({ ...st, assignments: st.assignments.map(a => ({ ...a })) }));
+      let pols  = s.policies.map(p => ({ ...p, submissions:{ ...p.submissions } }));
+      let live  = s.livePortfolio.map(lp => ({ ...lp }));
+      let done  = s.completed;
+      let log   = [...s.log];
+      let { nextEvent, nextHot, nextPet, nextArrival,
+            nextMeeting, nextSteer, nextSpad, spadNotifs, spadEscalations } = s;
+
+      let newModals = [];
+      let pendingModal = null;
+      function addModal(m) {
+        if (!pendingModal) pendingModal = m;
+        else newModals.push(m);
+      }
+
+      spadNotifs = [...spadNotifs];
+
+      staff.filter(st => st.isLocum && day >= st.expires).forEach(locum => {
+        locum.assignments.forEach(a => {
+          const pol = pols.find(p => p.id === a.policyId);
+          if (!pol) return;
+          const reg = staff.find(s2 => s2.type === "Lawyer" && !s2.isLocum
+            && !s2.assignments.some(x => x.policyId === a.policyId)
+            && staffLoad(s2, pols) + assignmentWeight("Lawyer", pol) <= CAPACITY["Lawyer"]);
+          if (reg) reg.assignments.push({ policyId: a.policyId, transit: TRANSIT_SWAP });
+        });
+        log = [{ text:`Locum Counsel returned to GLD.`, tag:"Locum", type:"warn" }, ...log];
+      });
+      staff = staff.filter(st => !(st.isLocum && day >= st.expires));
+
+      spadNotifs = spadNotifs.filter(n => {
+        if (day >= n.expires) { res.confidence = cl(res.confidence - 1); return false; }
+        return true;
+      });
+
+      staff.forEach(st => { st.assignments.forEach(a => { if (a.transit > 0) a.transit--; }); });
+
+      pols.forEach(pol => {
+        if (pol.awaitingHMT) return;
+        if (needsSubmission(pol)) return;
+        let gain = 0;
+        staff.forEach(st => {
+          const a = st.assignments.find(x => x.policyId === pol.id && x.transit === 0);
+          if (!a) return;
+          const essential   = isEssentialNow(st.type, pol);
+          const isSupport   = a.isSupport === true;
+          if (!essential && !isSupport) return;
+          const rate = essential ? 1.0 : 0.5;
+          const contributing = st.assignments.filter(x => {
+            if (x.transit > 0) return false;
+            const p = pols.find(pp => pp.id === x.policyId);
+            return p && (isEssentialNow(st.type, p) || x.isSupport === true);
+          }).length;
+          gain += rate * (100 / STAGE_WORK) / Math.max(1, contributing);
+        });
+        pol.progress += gain;
+      });
+
+      pols.forEach(pol => {
+        if (pol.stage !== 0 || pol.condition || pol.awaitingHMT) return;
+        if (pol.progress < 25 || pol.progress > 85) return;
+        if (Math.random() < RECLASSIFY_P) {
+          pol.condition = pick([CONDITIONS.HOT_POTATO, CONDITIONS.RED_TAPE]);
+          log = [{ text:`${pol.name} — research surfaced complications. Reclassified as ${pol.condition.label}.`, tag:"⚠ Reclassified", type:"warn" }, ...log];
+          const newType = essentialType(pol, pol.stage);
+          staff.forEach(st => {
+            if (st.type === "Policy Officer") return;
+            if (st.type !== newType) st.assignments = st.assignments.filter(a => a.policyId !== pol.id);
+          });
+          if (newType !== "Policy Officer" && !staff.some(st => st.type === newType && st.assignments.some(a => a.policyId === pol.id))) {
+            const h = findHandler(newType, staff, pol, pols);
+            if (h) h.assignments.push({ policyId: pol.id, transit: TRANSIT_SWAP });
+          }
+          addModal({ type:"routing", policyId:pol.id, kind:"reclassified" });
+        }
+      });
+
+      const completedIds = [];
+      pols.forEach(pol => {
+        if (pol.awaitingHMT) return;
+        if (pol.progress < 99.9) return;
+        if (pol.stage === 0 && pol.condition?.id === "CONSULTATION") pol.consulted = true;
+        if (pol.stage === 2) {
+          const htmResult = calculateHMT(pol);
+          pol.awaitingHMT = true;
+          addModal({ type:"htmResponse", policyId:pol.id, ...htmResult });
+          return;
+        }
+        if (pol.stage >= 3) { completedIds.push(pol.id); return; }
+        staff.forEach(st => {
+          if (st.type !== "Policy Officer") {
+            st.assignments = st.assignments.filter(a => a.policyId !== pol.id);
+          } else {
+            st.assignments = st.assignments.filter(a => a.policyId !== pol.id || !a.isSupport);
+          }
+        });
+        pol.stage++;
+        pol.progress = 0;
+        const newType = essentialType(pol, pol.stage);
+        if (newType !== "Policy Officer") {
+          const h = findHandler(newType, staff, pol, pols);
+          if (h) h.assignments.push({ policyId: pol.id, transit: TRANSIT_IDLE });
+          else log = [{ text:`${pol.name} now at ${STAGES[pol.stage]}, but no ${newType} available.`, tag:"⚠ Stalled", type:"warn" }, ...log];
+        }
+        if (pol.supportConfig[pol.stage]) tryAddSupportPO(pol, staff, pols);
+        if (needsSubmission(pol)) addModal({ type:"submission", policyId:pol.id, stage:needsSubmission(pol) });
+      });
+
+      completedIds.forEach(id => {
+        const pol = pols.find(p => p.id === id);
+        if (!pol) return;
+        done++;
+        const { impl, run } = calcCosts(pol);
+        res.programmeBudget = cl(res.programmeBudget - impl);
+        res.confidence = cl(res.confidence + 8);
+        res.trust      = cl(res.trust + 4);
+        const leadPO = staff.find(st =>
+          st.type === "Policy Officer" &&
+          st.assignments.some(a => a.policyId === id && !a.isSupport));
+        live.push({
+          id: `live-${id}`, name: pol.name, leadPOId: leadPO?.id || null,
+          health: 100, runningCost: run,
+          nextDrain: day+LIVE_DRAIN_PERIOD, nextTopup: day+LIVE_TOPUP_PERIOD, nextDecay: day+LIVE_DECAY_PERIOD,
+          issueRaised: false,
+        });
+        staff.forEach(st => { st.assignments = st.assignments.filter(a => a.policyId !== id); });
+        if (leadPO) leadPO.assignments.push({ policyId: `live-${id}`, transit: 0, isMonitoring: true });
+        log = [{ text:`${pol.name} — implemented. Policy now live. Lead PO: ${leadPO?.name || "unassigned"}.`, tag:"✓ Live", type:"success" }, ...log];
+        spadNotifs = spadNotifs.filter(n => n.policyId !== id);
+      });
+      pols = pols.filter(p => !completedIds.includes(p.id));
+      while (pols.length < 3 && done < 7) pols.push(randomPolicy());
+
+      live.forEach(lp => {
+        if (day >= lp.nextDrain) { res.programmeBudget = cl(res.programmeBudget - lp.runningCost); lp.nextDrain = day + LIVE_DRAIN_PERIOD; }
+        if (day >= lp.nextTopup) { res.programmeBudget = cl(res.programmeBudget + lp.runningCost); lp.nextTopup = day + LIVE_TOPUP_PERIOD; }
+        if (day >= lp.nextDecay) { lp.health = Math.max(0, lp.health - LIVE_DECAY); lp.nextDecay = day + LIVE_DECAY_PERIOD; }
+        if (lp.health <= LIVE_ISSUE_HEALTH && !lp.issueRaised && pols.length < INBOX_CAP) {
+          const issuePol = mkPol(`${lp.name} — Delivery Issue`, Math.random() < 0.5 ? CONDITIONS.HOT_POTATO : CONDITIONS.CONSULTATION);
+          pols.push(issuePol);
+          const po = findHandlerForced("Policy Officer", staff, pols);
+          if (po) po.assignments.push({ policyId: issuePol.id, transit: TRANSIT_IDLE });
+          const essType = essentialType(issuePol, 0);
+          if (essType !== "Policy Officer") {
+            const h = findHandler(essType, staff, issuePol, pols);
+            if (h) h.assignments.push({ policyId: issuePol.id, transit: TRANSIT_IDLE });
+          }
+          lp.health = LIVE_ISSUE_RESET; lp.issueRaised = true;
+          addModal({ type:"routing", policyId:issuePol.id, kind:"new" });
+          log = [{ text:`Issue arising from ${lp.name}. A new policy has entered the inbox.`, tag:"⚠ BAU Issue", type:"warn" }, ...log];
+        }
+        if (lp.issueRaised && lp.health >= LIVE_RECOVER_AT) lp.issueRaised = false;
+      });
+
+      if (day >= nextHot) {
+        const hots = pols.filter(p => p.condition?.id === "HOT_POTATO");
+        if (hots.length > 0) {
+          const d = 3 * hots.length;
+          res.confidence = cl(res.confidence - d);
+          log = [{ text:`Hot Potato pressure building. −${d} Confidence.`, tag:"Hot Potato", type:"warn" }, ...log];
+        }
+        nextHot = day + 5;
+      }
+
+      if (day === 35) nextPet = 35;
+      if (day >= 35 && day >= nextPet) {
+        const pets = pols.filter(p => p.condition?.id === "MINISTERS_PET");
+        if (pets.length > 0) {
+          const d = 3 * pets.length;
+          res.confidence = cl(res.confidence - d);
+          log = [{ text:`Minister's Pet unresolved. −${d} Confidence.`, tag:"Minister", type:"warn" }, ...log];
+        }
+        nextPet = day + 4;
+      }
+
+      if (day % 14 === 0) res.adminBudget = cl(res.adminBudget - 2);
+
+      if (day >= nextEvent) {
+        if (Math.random() < 0.45) {
+          const ev = pick(EVENTS);
+          res = ev.fn(res);
+          log = [{ text:ev.text, tag:ev.tag, type:"event" }, ...log];
+        }
+        nextEvent = day + 7 + Math.floor(Math.random() * 5);
+      }
+
+      if (day >= nextArrival && pols.length < INBOX_CAP) {
+        const newPol = randomPolicy();
+        pols.push(newPol);
+        const po = findHandlerForced("Policy Officer", staff, pols);
+        if (po) po.assignments.push({ policyId: newPol.id, transit: TRANSIT_IDLE });
+        const essType = essentialType(newPol, 0);
+        if (essType !== "Policy Officer") {
+          const h = findHandler(essType, staff, newPol, pols);
+          if (h) h.assignments.push({ policyId: newPol.id, transit: TRANSIT_IDLE });
+        }
+        log = [{ text:`New policy: ${newPol.name}${newPol.condition ? ` — flagged ${newPol.condition.label}` : ""}.`, tag:"📋 New", type:"intro" }, ...log];
+        nextArrival = day + ARRIVAL_MIN + Math.floor(Math.random() * (ARRIVAL_MAX - ARRIVAL_MIN));
+        addModal({ type:"routing", policyId:newPol.id, kind:"new" });
+      }
+
+      staff = ensurePOCoverage(staff, pols);
+
+      if (day >= nextMeeting) { addModal({ type:"meeting", day }); nextMeeting = day + MEETING_INTERVAL; }
+
+      if (day >= nextSteer && pols.length > 0) {
+        const steer = steerForState(pols);
+        addModal({ ...steer, type:"steer" });
+        nextSteer = day + STEER_INT_MIN + Math.floor(Math.random() * (STEER_INT_MAX - STEER_INT_MIN));
+      }
+
+      if (day >= nextSpad && pols.length > 0 && spadNotifs.length < 3) {
+        const intv = spadIntervention(pols, day);
+        if (intv) {
+          spadNotifs.push(intv);
+          log = [{ text:`${SPAD.name}: "${intv.text.slice(0,60)}…"`, tag:"SpAd", type:"event" }, ...log];
+        }
+        const extra = spadEscalations * 6;
+        nextSpad = day + SPAD_INT_MIN + Math.floor(Math.random() * (SPAD_INT_MAX - SPAD_INT_MIN)) + extra;
+      }
+
+      log = log.slice(0, 14);
+
+      const won  = done >= 7;
+      const dead = day >= TOTAL_DAYS;
+      const lost = res.adminBudget <= 0 || res.programmeBudget <= 0 || res.confidence <= 0 || res.trust <= 0 || dead;
+      let outcome = s.outcome, outcomeMsg = s.outcomeMsg;
+      if (won)       { outcome = "won";      outcomeMsg = pick(OUTCOMES.won); }
+      else if (lost) {
+        if      (dead)                     outcome = "deadline";
+        else if (res.adminBudget <= 0)     outcome = "admin";
+        else if (res.programmeBudget <= 0) outcome = "programme";
+        else if (res.confidence <= 0)      outcome = "confidence";
+        else                               outcome = "trust";
+        outcomeMsg = pick(OUTCOMES[outcome]);
+      }
+
+      const fullQueue = [...s.modalQueue, ...newModals];
+      const resolvedActive = pendingModal || (fullQueue.length > 0 ? fullQueue.shift() : null);
+
+      return {
+        ...s, day, res, staff, policies:pols, livePortfolio:live, completed:done, log,
+        nextEvent, nextHot, nextPet, nextArrival, nextMeeting, nextSteer, nextSpad,
+        spadNotifs, spadEscalations,
+        modalQueue:    resolvedActive ? fullQueue : [],
+        activeModal:   resolvedActive,
+        speed:         (won || lost || resolvedActive) ? "pause" : s.speed,
+        gameOver:      won || lost,
+        outcome,       outcomeMsg,
+      };
+    }
+
+    // ── Palette ──────────────────────────────────────────────────────────────────
+    const C = {
+      bg:"#0a1208", panel:"#0d160d", border:"#1a341a",
+      green:"#7bc47b", dim:"#4a6a4a", faint:"#1e3a1e",
+      text:"#c8d8c0", budget:"#27ae60", conf:"#e67e22",
+      trust:"#2980b9", red:"#e74c3c", amber:"#f39c12",
+      blue:"#5fa8d5", purple:"#a07bc4",
+      mono:"'Courier New',monospace",
+    };
+
+    function Bar({ label, value, color, dim = false }) {
+      const low = value < 25;
+      return (
+        <div style={{ marginBottom:9 }}>
+          <div style={{ display:"flex", justifyContent:"space-between", fontSize:9, color:C.dim, marginBottom:3 }}>
+            <span style={{ color: dim ? C.faint : C.dim }}>{label}</span>
+            <span style={{ color: dim ? C.faint : low ? C.red : C.green }}>{Math.round(value)}</span>
+          </div>
+          <div style={{ height:4, background:"#182818", borderRadius:2, overflow:"hidden" }}>
+            <div style={{ height:"100%", width:`${Math.max(0,value)}%`, background: dim ? C.faint : low ? C.red : color, borderRadius:2, transition:"width 0.4s", opacity: dim ? 0.4 : 1 }} />
+          </div>
+        </div>
+      );
+    }
+
+    function SpeedBtn({ label, val, current, onClick, dev = false }) {
+      const active = current === val;
+      const col    = dev ? C.amber : C.green;
+      return (
+        <button onClick={onClick} style={{ padding:"4px 12px", fontFamily:C.mono, fontSize:10, background: active ? C.faint : "transparent", border:`1px solid ${active ? col : (dev ? C.amber+"40" : C.faint)}`, color: active ? col : dev ? C.amber+"a0" : C.dim, cursor:"pointer", borderRadius:2 }}>{label}</button>
+      );
+    }
+
+    function ModalShell({ border, children }) {
+      return (
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.82)", zIndex:100, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+          <div style={{ background:C.panel, border:`1px solid ${border}`, borderRadius:4, padding:"22px 26px", maxWidth:620, width:"100%", maxHeight:"90vh", overflowY:"auto" }}>{children}</div>
+        </div>
+      );
+    }
+    function ML({ color, children }) {
+      return <div style={{ fontSize:9, letterSpacing:3, color, marginBottom:10 }}>{children}</div>;
+    }
+    function MB({ onClick, colour, children }) {
+      return (
+        <button onClick={onClick} style={{ padding:"8px 22px", background:C.faint, border:`1px solid ${colour}`, color:colour, cursor:"pointer", fontFamily:C.mono, fontSize:11, letterSpacing:2 }}>{children}</button>
+      );
+    }
+
+    function Pipeline({ policy, staff }) {
+      const assigned = staff.filter(st => st.assignments.some(a => a.policyId === policy.id));
+      const subPend  = needsSubmission(policy);
+      return (
+        <div style={{ display:"flex", gap:3, marginTop:8 }}>
+          {STAGES.map((_, i) => {
+            const isComplete = i < policy.stage;
+            const isCurrent  = i === policy.stage;
+            const here       = assigned.filter(st => { const a = st.assignments.find(x => x.policyId === policy.id); return a && a.transit === 0; });
+            const essT  = essentialType(policy, i);
+            const active   = isCurrent ? here.filter(st => st.type === essT) : [];
+            const hasPO    = isCurrent ? here.some(st => st.type === "Policy Officer") : false;
+            const subBlock = isCurrent && subPend;
+            const hmtWait  = isCurrent && policy.awaitingHMT;
+            const blocked  = isCurrent && !subBlock && !hmtWait && (active.length === 0 || !hasPO);
+            const sc       = policy.condition?.color || C.green;
+            return (
+              <div key={i} style={{ flex:1, borderRadius:3, overflow:"hidden", position:"relative", border:`1px solid ${isComplete ? sc+"70" : isCurrent ? sc : C.faint}`, background: isComplete ? sc+"22" : "#0e160e", height:34 }}>
+                {isCurrent && !hmtWait && (
+                  <div style={{ position:"absolute", top:0, left:0, height:"100%", width:`${Math.min(100, policy.progress)}%`, background: (blocked||subBlock) ? C.red+"40" : sc+"35", transition:"width 0.4s" }} />
+                )}
+                <div style={{ position:"absolute", inset:0, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:1, zIndex:1 }}>
+                  <div style={{ fontSize:8, letterSpacing:0.5, color: isComplete ? sc : isCurrent ? C.text : C.faint, fontWeight: isCurrent ? "bold" : "normal" }}>{isComplete ? "✓ " : ""}{STAGE_SHORT[i]}</div>
+                  {hmtWait && <div style={{ fontSize:7, color:C.amber }}>HMT review</div>}
+                  {subBlock && !hmtWait && <div style={{ fontSize:7, color:C.purple }}>awaiting brief</div>}
+                  {isCurrent && !subBlock && !hmtWait && !blocked && policy.progress > 5 && (
+                    <div style={{ fontSize:7, color:sc }}>{Math.min(99,Math.round(policy.progress))}%</div>
+                  )}
+                  {blocked && <div style={{ fontSize:7, color:C.red }}>idle</div>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    function RoutingModal({ policy, staff, policies, kind, onConfirm }) {
+      const [toggles, setToggles] = useState(policy.supportConfig || [false,false,false,false]);
+      if (!policy) return null;
+      const route    = computeRouting(policy, staff, policies);
+      const suppCand = findSupportPO(policy, staff, policies);
+      const isR      = kind === "reclassified";
+      const { impl } = calcCosts(policy);
+      return (
+        <ModalShell border={isR ? C.amber : C.green}>
+          <ML color={isR ? C.amber : C.green}>{isR ? "⚠ POLICY RECLASSIFIED" : "📋 NEW POLICY ARRIVED"}</ML>
+          <div style={{ fontSize:16, color:C.text, fontWeight:"bold", marginBottom:5 }}>{policy.name}</div>
+          {policy.condition ? <div style={{ fontSize:10, color:policy.condition.color, marginBottom:4 }}>{policy.condition.label}</div> : <div style={{ fontSize:10, color:C.dim, marginBottom:4 }}>Business as usual</div>}
+          <div style={{ fontSize:10, color:C.dim, lineHeight:1.7, marginBottom:10 }}>{policy.condition ? policy.condition.desc : "Business as usual. No special conditions at intake."}</div>
+          <div style={{ fontSize:9, color:C.faint, marginBottom:16, lineHeight:1.6 }}>Expected implementation cost: <span style={{ color:C.green }}>£{impl}m</span> (funded at Sign-Off if HMT approves)</div>
+          <ML color={C.faint}>PROPOSED ROUTING — ☐ to add support PO</ML>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8, marginBottom:16 }}>
+            {route.map(r => {
+              const isCur = r.stage === policy.stage;
+              const suppAvail = suppCand && (!r.essential || suppCand.id !== r.essential.id);
+              return (
+                <div key={r.stage} style={{ padding:"10px 8px", textAlign:"center", borderRadius:3, position:"relative", background: isCur ? "#131f13" : "#0c140c", border:`1px solid ${isCur ? C.green : C.border}` }}>
+                  <div style={{ fontSize:8, color:C.faint, letterSpacing:2, marginBottom:7 }}>{STAGE_SHORT[r.stage].toUpperCase()}</div>
+                  {r.essential ? (
+                    <>
+                      <div style={{ width:28,height:28,borderRadius:"50%",background:C.faint,border:`1px solid ${C.green}`,margin:"0 auto 4px",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:C.green }}>{r.essential.initials}</div>
+                      <div style={{ fontSize:9,color:C.text,marginBottom:2,lineHeight:1.3 }}>{r.essential.name.split(" ")[0]}</div>
+                      <div style={{ fontSize:8,color:C.dim,marginBottom:6 }}>{r.essType}</div>
+                      {r.support && (<div style={{ borderTop:`1px dashed ${C.faint}`,paddingTop:5,marginBottom:6 }}><div style={{ fontSize:7,color:C.dim,marginBottom:2 }}>+ shadowing</div><div style={{ fontSize:8,color:C.dim }}>{r.support.initials}</div></div>)}
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ width:28,height:28,borderRadius:"50%",background:"#2d1010",border:`1px solid ${C.red}`,margin:"0 auto 4px",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:C.red }}>—</div>
+                      <div style={{ fontSize:9,color:C.red,marginBottom:2 }}>at capacity</div>
+                      <div style={{ fontSize:8,color:C.dim,marginBottom:6 }}>{r.essType}</div>
+                    </>
+                  )}
+                  <div style={{ borderTop:`1px solid ${C.border}`,paddingTop:6 }}>
+                    <button onClick={() => suppAvail && setToggles(prev => { const n=[...prev]; n[r.stage]=!n[r.stage]; return n; })} disabled={!suppAvail} style={{ width:"100%",padding:"4px 0",fontFamily:C.mono,background: toggles[r.stage] ? C.faint : "transparent",border:`1px solid ${toggles[r.stage] ? C.blue : C.border}`,color: suppAvail ? (toggles[r.stage] ? C.blue : C.dim) : C.faint,fontSize:8,cursor:suppAvail?"pointer":"not-allowed",borderRadius:2 }}>
+                      {toggles[r.stage] ? "☑" : "☐"} support
+                    </button>
+                    <div style={{ fontSize:7,color:C.faint,marginTop:3 }}>{suppAvail ? `${suppCand.initials} · ½ speed` : "no spare PO"}</div>
+                  </div>
+                  {isCur && <div style={{ position:"absolute",top:-6,right:-6,fontSize:7,color:C.green,background:C.bg,padding:"1px 5px",borderRadius:2,border:`1px solid ${C.green}` }}>now</div>}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ fontSize:8,color:C.faint,lineHeight:1.7,marginBottom:14,fontStyle:"italic" }}>HMT approval will be sought at Sign-Off. The submission tone you choose at that stage will influence whether the bid is approved, approved within existing budget, or returned.</div>
+          <div style={{ display:"flex",justifyContent:"flex-end" }}><MB onClick={() => onConfirm(toggles)} colour={C.green}>CONFIRM ROUTING</MB></div>
+        </ModalShell>
+      );
+    }
+
+    function SubmissionModal({ policy, stage, onSubmit }) {
+      if (!policy) return null;
+      const isSignOff = stage === "signoff";
+      return (
+        <ModalShell border={C.purple}>
+          <ML color={C.purple}>📝 SUBMISSION — {isSignOff ? "SIGN-OFF + HMT BID" : "DEVELOPMENT"}</ML>
+          <div style={{ fontSize:16,color:C.text,fontWeight:"bold",marginBottom:6 }}>{policy.name}</div>
+          <div style={{ fontSize:10,color:C.dim,lineHeight:1.7,marginBottom:isSignOff?6:18 }}>{isSignOff ? `${MINISTER.name} and HM Treasury both require a submission before this policy can proceed. The tone you choose will affect the Minister's confidence AND the likelihood of HMT approving your funding bid.` : `${MINISTER.name} has asked for a submission before this policy can advance to Sign-Off. How should we frame it?`}</div>
+          {isSignOff && (<div style={{ fontSize:9,color:C.faint,marginBottom:14,lineHeight:1.6 }}>Expected implementation cost: <span style={{ color:C.green }}>£{calcCosts(policy).impl}m</span></div>)}
+          <div style={{ display:"flex",flexDirection:"column",gap:9 }}>
+            {Object.entries(SUBMISSION_TONES).map(([key,tone]) => (
+              <button key={key} onClick={() => onSubmit(key)} style={{ padding:"11px 14px",textAlign:"left",background:"#0c140c",border:`1px solid ${C.border}`,borderRadius:3,color:C.text,cursor:"pointer",fontFamily:C.mono }}
+              onMouseEnter={e => { e.currentTarget.style.background="#131f13"; e.currentTarget.style.borderColor=C.purple; }}
+              onMouseLeave={e => { e.currentTarget.style.background="#0c140c"; e.currentTarget.style.borderColor=C.border; }}>
+                <div style={{ display:"flex",justifyContent:"space-between",marginBottom:4 }}>
+                  <span style={{ fontSize:12,color:C.purple,fontWeight:"bold" }}>{tone.label}</span>
+                  <span style={{ fontSize:9,color:C.dim }}>
+                    <span style={{ color:tone.confidence>0?C.green:C.red }}>{tone.confidence>0?"+":""}{tone.confidence} Conf</span>
+                    {" · "}
+                    <span style={{ color:tone.trust>0?C.green:C.red }}>{tone.trust>0?"+":""}{tone.trust} Trust</span>
+                    {isSignOff && (<span style={{ color:C.dim }}> · HMT: <span style={{ color:C.green }}>{Math.round(tone.htmWeights.approved*100)}%</span>/<span style={{ color:C.amber }}>{Math.round(tone.htmWeights.within*100)}%</span>/<span style={{ color:C.red }}>{Math.round(tone.htmWeights.rejected*100)}%</span> appv/within/rej</span>)}
+                  </span>
+                </div>
+                <div style={{ fontSize:9,color:C.dim,lineHeight:1.5,fontStyle:"italic" }}>{tone.desc}</div>
+              </button>
+            ))}
+          </div>
+        </ModalShell>
+      );
+    }
+
+    function HTMModal({ modal, policy, onConfirm }) {
+      if (!policy) return null;
+      const { response, rejectedTo, amount } = modal;
+      const col = response === "approved" ? C.green : response === "within" ? C.amber : C.red;
+      const headline = response === "approved" ? "BID APPROVED" : response === "within" ? "APPROVED — WITHIN EXISTING BUDGET" : "BID RETURNED";
+      const body = response === "approved" ? HMT_TEXT.approved(policy.name, amount) : response === "within" ? HMT_TEXT.within(policy.name) : rejectedTo === 0 ? HMT_TEXT.rejected_0() : rejectedTo === 1 ? HMT_TEXT.rejected_1() : HMT_TEXT.rejected_2();
+      const stageNames = ["Research","Development","Sign-Off"];
+      return (
+        <ModalShell border={col}>
+          <ML color={col}>🏛 HM TREASURY RESPONSE — {headline}</ML>
+          <div style={{ fontSize:13,color:C.text,fontWeight:"bold",marginBottom:10 }}>{policy.name}</div>
+          {response === "approved" && (<div style={{ fontSize:11,color:C.green,marginBottom:10 }}>+£{amount}m to Programme Budget</div>)}
+          {response === "rejected" && (<div style={{ fontSize:11,color:C.red,marginBottom:10 }}>Returned to: {stageNames[rejectedTo]}</div>)}
+          <div style={{ background:"#0c140c",border:`1px solid ${col}40`,borderRadius:3,padding:"12px 14px",marginBottom:18 }}>
+            <div style={{ fontSize:11,color:C.text,lineHeight:1.8,fontStyle:"italic" }}>"{body}"</div>
+          </div>
+          <div style={{ display:"flex",justifyContent:"flex-end" }}><MB onClick={onConfirm} colour={col}>NOTED</MB></div>
+        </ModalShell>
+      );
+    }
+
+    function MeetingModal({ policies, res, completed, onClose }) {
+      const { dConf, lines } = meetingLines(policies, res, completed);
+      return (
+        <ModalShell border={C.green}>
+          <ML color={C.green}>👥 MONTHLY BILATERAL — {MINISTER.name.toUpperCase()}</ML>
+          <div style={{ fontSize:10,color:C.dim,marginBottom:14,lineHeight:1.6 }}>Your standing 1:1 with the Secretary of State.</div>
+          <div style={{ background:"#0c140c",border:`1px solid ${C.border}`,borderRadius:3,padding:"12px 14px",marginBottom:14 }}>
+            {lines.map((l,i) => (<div key={i} style={{ fontSize:11,color:C.text,lineHeight:1.7,fontStyle:"italic",marginBottom:i<lines.length-1?8:0 }}>{l}</div>))}
+          </div>
+          <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14 }}>
+            <span style={{ fontSize:9,color:C.dim }}>Net confidence effect:</span>
+            <span style={{ fontSize:11,color:dConf>0?C.green:dConf<0?C.red:C.dim }}>{dConf>0?"+":""}{dConf}</span>
+          </div>
+          <div style={{ display:"flex",justifyContent:"flex-end" }}><MB onClick={() => onClose(dConf)} colour={C.green}>CONCLUDE MEETING</MB></div>
+        </ModalShell>
+      );
+    }
+
+    function SteerModal({ modal, policies, onChoose }) {
+      const pol = modal.policyId ? policies.find(p => p.id === modal.policyId) : null;
+      return (
+        <ModalShell border={C.amber}>
+          <ML color={C.amber}>📞 MINISTERIAL STEER — {MINISTER.name.toUpperCase()}</ML>
+          <div style={{ display:"flex",gap:12,marginBottom:14 }}>
+            <div style={{ width:36,height:36,borderRadius:"50%",background:C.faint,border:`1px solid ${C.amber}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:C.amber,flexShrink:0 }}>{MINISTER.initials}</div>
+            <div style={{ fontSize:11,color:C.text,lineHeight:1.7,fontStyle:"italic" }}>"{modal.text}"</div>
+          </div>
+          {pol && <div style={{ fontSize:9,color:C.dim,marginBottom:12 }}>re: <span style={{ color:C.text }}>{pol.name}</span></div>}
+          <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+            {modal.options.map((opt,i) => (
+              <button key={i} onClick={() => onChoose(opt)} style={{ padding:"10px 13px",textAlign:"left",background:"#0c140c",border:`1px solid ${C.border}`,borderRadius:3,color:C.text,cursor:"pointer",fontFamily:C.mono,display:"flex",justifyContent:"space-between",alignItems:"center" }}
+              onMouseEnter={e => { e.currentTarget.style.background="#131f13"; e.currentTarget.style.borderColor=C.amber; }}
+              onMouseLeave={e => { e.currentTarget.style.background="#0c140c"; e.currentTarget.style.borderColor=C.border; }}>
+                <span style={{ fontSize:11,color:C.amber }}>{opt.label}</span>
+                <span style={{ fontSize:9,color:C.dim }}>
+                  {opt.confidence!==0 && <span style={{ color:opt.confidence>0?C.green:C.red,marginRight:8 }}>{opt.confidence>0?"+":""}{opt.confidence} Conf</span>}
+                  {opt.trust!==0 && <span style={{ color:opt.trust>0?C.green:C.red }}>{opt.trust>0?"+":""}{opt.trust} Trust</span>}
+                </span>
+              </button>
+            ))}
+          </div>
+        </ModalShell>
+      );
+    }
+
+    function SpadCard({ notif, policies, onChoose }) {
+      const pol = policies.find(p => p.id === notif.policyId);
+      return (
+        <div style={{ background:"#0c140c",border:`1px solid ${C.blue}40`,borderLeft:`3px solid ${C.blue}`,borderRadius:3,padding:"9px 11px",marginBottom:8 }}>
+          <div style={{ display:"flex",alignItems:"flex-start",gap:8,marginBottom:7 }}>
+            <div style={{ width:22,height:22,borderRadius:"50%",background:"#0d1a23",border:`1px solid ${C.blue}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:C.blue,flexShrink:0 }}>{SPAD.initials}</div>
+            <div>
+              <div style={{ fontSize:8,color:C.blue,letterSpacing:2,marginBottom:3 }}>{SPAD.name.toUpperCase()}</div>
+              <div style={{ fontSize:10,color:C.text,lineHeight:1.5 }}>{notif.text}</div>
+              {pol && <div style={{ fontSize:8,color:C.dim,marginTop:3 }}>re: {pol.name}</div>}
+            </div>
+          </div>
+          <div style={{ display:"flex",gap:5,flexWrap:"wrap" }}>
+            {notif.options.map((opt,i) => (
+              <button key={i} onClick={() => onChoose(notif.id,opt)} style={{ padding:"4px 9px",fontSize:9,background:"transparent",border:`1px solid ${C.blue}40`,color:C.blue,cursor:"pointer",borderRadius:2,fontFamily:C.mono }}
+              onMouseEnter={e => e.currentTarget.style.background=`${C.blue}20`}
+              onMouseLeave={e => e.currentTarget.style.background="transparent"}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function LiveStrip({ livePortfolio, staff }) {
+      if (livePortfolio.length === 0) return null;
+      return (
+        <div style={{ marginBottom:12,padding:"10px 13px",background:"#0a140a",border:`1px solid ${C.faint}`,borderRadius:3 }}>
+          <div style={{ fontSize:8,letterSpacing:3,color:C.faint,marginBottom:10 }}>LIVE PORTFOLIO ({livePortfolio.length} active)</div>
+          {livePortfolio.map(lp => {
+            const leadPO = lp.leadPOId ? staff.find(s => s.id === lp.leadPOId) : null;
+            const hCol   = lp.health > 60 ? C.green : lp.health > 25 ? C.amber : C.red;
+            return (
+              <div key={lp.id} style={{ display:"flex",alignItems:"center",gap:10,marginBottom:6,paddingBottom:6,borderBottom:`1px solid ${C.faint}` }}>
+                <div style={{ flex:1,fontSize:10,color:C.dim,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis" }}>{lp.name}</div>
+                {leadPO && (<div style={{ display:"flex",alignItems:"center",gap:4,flexShrink:0 }}><div style={{ width:18,height:18,borderRadius:"50%",background:C.faint,border:`1px solid ${C.green}40`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:7,color:C.green }}>{leadPO.initials}</div><span style={{ fontSize:8,color:C.faint }}>○</span></div>)}
+                <div style={{ width:80,flexShrink:0 }}>
+                  <div style={{ display:"flex",justifyContent:"space-between",fontSize:7,color:C.faint,marginBottom:2 }}><span>health</span><span style={{ color:hCol }}>{Math.round(lp.health)}%</span></div>
+                  <div style={{ height:3,background:"#182818",borderRadius:1,overflow:"hidden" }}><div style={{ height:"100%",width:`${lp.health}%`,background:hCol,borderRadius:1,transition:"width 0.4s" }} /></div>
+                </div>
+              </div>
+            );
+          })}
+          <div style={{ fontSize:8,color:C.faint,lineHeight:1.6,marginTop:6 }}>Health decays over time. Low health triggers a new delivery issue in the inbox. Lead PO provides ongoing oversight at light capacity.</div>
+        </div>
+      );
+    }
+
+    function Whitehall() {
+      const [st, set] = useState(init);
+
+      useEffect(() => {
+        if (st.speed === "pause" || st.gameOver || st.activeModal) return;
+        const ms = st.speed === "dev"  ? Math.round(TICK_MS / 10)
+                 : st.speed === "fast" ? Math.round(TICK_MS / 3)
+                 : TICK_MS;
+        const id = setInterval(() =>
+          set(s => (s.speed === "pause" || s.gameOver || s.activeModal) ? s : tick(s)), ms);
+        return () => clearInterval(id);
+      }, [st.speed, st.gameOver, st.activeModal]);
+
+      const setSpeed = v => set(s => s.gameOver ? s : { ...s, speed:v });
+      const selectPolicy = id => set(s => ({ ...s, selected: s.selected === id ? null : id }));
+
+      function closeModal(updates = {}) {
+        set(s => {
+          const q = s.modalQueue;
+          return { ...s, ...updates, activeModal: q.length > 0 ? q[0] : null, modalQueue: q.length > 0 ? q.slice(1) : [] };
+        });
+      }
+
+      function onRoutingConfirm(toggles) {
+        set(s => {
+          const m = s.activeModal;
+          if (!m || m.type !== "routing") { closeModal(); return s; }
+          let policies = s.policies.map(p => p.id !== m.policyId ? p : { ...p, supportConfig:[...toggles] });
+          let staff    = s.staff.map(st => ({ ...st, assignments:st.assignments.map(a=>({...a})) }));
+          const pol    = policies.find(p => p.id === m.policyId);
+          if (pol && toggles[pol.stage]) {
+            staff.forEach(st => { if (st.type !== "Policy Officer") return; st.assignments = st.assignments.filter(a => a.policyId !== pol.id || !a.isSupport); });
+            tryAddSupportPO(pol, staff, policies);
+          }
+          const q = s.modalQueue;
+          return { ...s, policies, staff, activeModal: q.length>0 ? q[0] : null, modalQueue: q.length>0 ? q.slice(1) : [] };
+        });
+      }
+
+      function onSubmissionChoose(key) {
+        set(s => {
+          const m    = s.activeModal;
+          const tone = SUBMISSION_TONES[key];
+          const pols = s.policies.map(p => p.id !== m.policyId ? p : { ...p, submissions:{ ...p.submissions, [m.stage]:key } });
+          const res  = { ...s.res, confidence:cl(s.res.confidence + tone.confidence), trust:cl(s.res.trust + tone.trust) };
+          const name = s.policies.find(p => p.id === m.policyId)?.name || "policy";
+          const log  = [{ text:`${name} — submission filed (${tone.label}). ${tone.result}`, tag:tone.label, type:"event" }, ...s.log].slice(0,14);
+          const q    = s.modalQueue;
+          return { ...s, policies:pols, res, log, activeModal:q.length>0?q[0]:null, modalQueue:q.length>0?q.slice(1):[] };
+        });
+      }
+
+      function onHTMConfirm() {
+        set(s => {
+          const m   = s.activeModal;
+          const pol = s.policies.find(p => p.id === m.policyId);
+          if (!pol) { closeModal(); return s; }
+          let res  = { ...s.res };
+          let pols = s.policies.map(p => ({ ...p }));
+          let staff = s.staff.map(st => ({ ...st, assignments:st.assignments.map(a=>({...a})) }));
+          let log  = [...s.log];
+          const target = pols.find(p => p.id === m.policyId);
+          if (m.response === "approved") {
+            res.programmeBudget = cl(res.programmeBudget + m.amount);
+            advanceToImpl(target, staff, pols, s.day);
+            log = [{ text:`HMT approved ${target.name}. +£${m.amount}m programme. Proceeding to Implementation.`, tag:"✓ HMT", type:"success" }, ...log];
+          } else if (m.response === "within") {
+            advanceToImpl(target, staff, pols, s.day);
+            log = [{ text:`HMT approved ${target.name} within existing budget. No additional funding.`, tag:"HMT", type:"event" }, ...log];
+          } else {
+            target.awaitingHMT = false; target.stage = m.rejectedTo; target.progress = 0;
+            staff.forEach(st => { if (st.type !== "Policy Officer") { st.assignments = st.assignments.filter(a => a.policyId !== target.id); } else { st.assignments = st.assignments.filter(a => a.policyId !== target.id || !a.isSupport); } });
+            const newType = essentialType(target, target.stage);
+            if (newType !== "Policy Officer") { const h = findHandler(newType, staff, target, pols); if (h) h.assignments.push({ policyId:target.id, transit:TRANSIT_IDLE }); }
+            log = [{ text:`HMT returned ${target.name} to ${STAGES[m.rejectedTo]}. Bid must be revised.`, tag:"✗ HMT", type:"warn" }, ...log];
+          }
+          log = log.slice(0,14);
+          const q = s.modalQueue;
+          return { ...s, policies:pols, staff, res, log, activeModal:q.length>0?q[0]:null, modalQueue:q.length>0?q.slice(1):[] };
+        });
+      }
+
+      function onMeetingClose(dConf) {
+        set(s => {
+          const res = { ...s.res, confidence:cl(s.res.confidence + dConf) };
+          const log = [{ text:`Monthly bilateral with ${MINISTER.name}. ${dConf>=0?"+":""}${dConf} Confidence.`, tag:"Meeting", type:"event" }, ...s.log].slice(0,14);
+          const q   = s.modalQueue;
+          return { ...s, res, log, activeModal:q.length>0?q[0]:null, modalQueue:q.length>0?q.slice(1):[] };
+        });
+      }
+
+      function onSteerChoose(opt) {
+        set(s => {
+          const res = { ...s.res, confidence:cl(s.res.confidence+(opt.confidence||0)), trust:cl(s.res.trust+(opt.trust||0)) };
+          const log = [{ text:opt.log, tag:"Steer", type:"event" }, ...s.log].slice(0,14);
+          const q   = s.modalQueue;
+          return { ...s, res, log, activeModal:q.length>0?q[0]:null, modalQueue:q.length>0?q.slice(1):[] };
+        });
+      }
+
+      function onSpadChoose(notifId, opt) {
+        set(s => {
+          const res = { ...s.res, confidence:cl(s.res.confidence+(opt.confidence||0)), trust:cl(s.res.trust+(opt.trust||0)) };
+          const log = [{ text:opt.log, tag:"SpAd", type:"event" }, ...s.log].slice(0,14);
+          return { ...s, res, log, spadNotifs:s.spadNotifs.filter(n => n.id !== notifId), spadEscalations:s.spadEscalations + (opt.reducesFuture ? 1 : 0) };
+        });
+      }
+
+      function requestCounsel() {
+        set(s => {
+          if (s.gameOver || s.res.adminBudget < LOCUM_COST || s.staff.some(x => x.isLocum)) return s;
+          const locum = { id:`locum-${s.day}`, name:"Locum Counsel", type:"Lawyer", initials:"LC", assignments:[], expires:s.day+LOCUM_DURATION, isLocum:true };
+          return { ...s, res:{ ...s.res, adminBudget:s.res.adminBudget - LOCUM_COST }, staff:[...s.staff, locum], log:[{ text:`Locum Counsel engaged from GLD. −${LOCUM_COST} Admin Budget. ${LOCUM_DURATION} days.`, tag:"+1 Lawyer", type:"intro" }, ...s.log].slice(0,14) };
+        });
+      }
+
+      function handleStaffClick(staffId) {
+        set(s => {
+          if (!s.selected || s.gameOver) return s;
+          const staff  = s.staff.map(st => ({ ...st, assignments:st.assignments.map(a=>({...a})) }));
+          const m      = staff.find(st => st.id === staffId);
+          if (!m) return s;
+          const pol    = s.policies.find(p => p.id === s.selected);
+          if (!pol) return s;
+          const exists = m.assignments.find(a => a.policyId === s.selected);
+          if (exists) {
+            if (m.type === "Policy Officer") {
+              const otherPOs = staff.filter(o => o.id !== m.id && o.type === "Policy Officer" && o.assignments.some(a => a.policyId === s.selected));
+              if (!otherPOs.length) return s;
+            }
+            m.assignments = m.assignments.filter(a => a.policyId !== s.selected);
+          } else {
+            const load = staffLoad(m, s.policies);
+            if (load + assignmentWeight(m.type, pol) > CAPACITY[m.type]) return s;
+            const alreadyHasPO = m.type === "Policy Officer" && staff.some(o => o.id !== m.id && o.type === "Policy Officer" && o.assignments.some(a => a.policyId === s.selected));
+            m.assignments.push({ policyId: s.selected, transit: m.assignments.length > 0 ? TRANSIT_SWAP : TRANSIT_IDLE, isSupport: alreadyHasPO });
+          }
+          return { ...s, staff };
+        });
+      }
+
+      const { day, speed, res, policies, livePortfolio, staff, completed, log, selected,
+        gameOver, outcome, outcomeMsg, activeModal, spadNotifs } = st;
+      const daysLeft    = TOTAL_DAYS - day;
+      const selPol      = policies.find(p => p.id === selected);
+      const activeLocum = staff.find(s => s.isLocum);
+      const modalPol    = activeModal?.policyId ? policies.find(p => p.id === activeModal.policyId) : null;
+
+      return (
+        <div style={{ background:C.bg,minHeight:"100vh",color:C.text,fontFamily:C.mono,display:"flex",flexDirection:"column" }}>
+          {/* HEADER */}
+          <div style={{ background:C.panel,borderBottom:`1px solid ${C.border}`,padding:"8px 18px",display:"flex",justifyContent:"space-between",alignItems:"center" }}>
+            <div>
+              <span style={{ fontSize:16,color:C.green,fontFamily:"Georgia,serif",fontStyle:"italic",letterSpacing:3 }}>Whitehall</span>
+              <span style={{ fontSize:8,color:C.faint,letterSpacing:3,marginLeft:14 }}>PROTOTYPE v0.9</span>
+            </div>
+            <div style={{ display:"flex",alignItems:"center",gap:16 }}>
+              <div style={{ fontSize:10,color:C.dim }}>
+                <span style={{ color:C.text }}>{fmtDate(day)}</span>
+                <span style={{ margin:"0 8px",color:C.faint }}>·</span>
+                <span style={{ color:daysLeft<14?C.red:C.dim }}>{daysLeft}d to recess</span>
+                <span style={{ margin:"0 8px",color:C.faint }}>·</span>
+                <span style={{ color:completed>=5?C.green:C.dim }}>{completed}/7 complete</span>
+              </div>
+              {!gameOver && (
+                <div style={{ display:"flex",gap:4 }}>
+                  <SpeedBtn label="⏸ Pause" val="pause" current={speed} onClick={()=>setSpeed("pause")} />
+                  <SpeedBtn label="▶ Play"  val="play"  current={speed} onClick={()=>setSpeed("play")}  />
+                  <SpeedBtn label="▶▶ Fast" val="fast"  current={speed} onClick={()=>setSpeed("fast")}  />
+                  <SpeedBtn label="⚡ Dev"  val="dev"   current={speed} onClick={()=>setSpeed("dev")} dev />
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* MINISTER / SPAD STRIP */}
+          <div style={{ background:"#0a140a",borderBottom:`1px solid ${C.border}`,padding:"6px 18px",display:"flex",justifyContent:"space-between",alignItems:"center" }}>
+            <div style={{ display:"flex",alignItems:"center",gap:10 }}>
+              <div style={{ width:24,height:24,borderRadius:"50%",background:C.faint,border:`1px solid ${C.amber}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:C.amber }}>{MINISTER.initials}</div>
+              <div>
+                <div style={{ fontSize:10,color:C.text }}>{MINISTER.name}</div>
+                <div style={{ fontSize:8,color:C.dim }}>{MINISTER.title} · {MINISTER.trait} · {MINISTER.concern}</div>
+              </div>
+            </div>
+            <div style={{ display:"flex",alignItems:"center",gap:10 }}>
+              <div style={{ textAlign:"right" }}>
+                <div style={{ fontSize:10,color:C.text }}>{SPAD.name}</div>
+                <div style={{ fontSize:8,color:C.dim }}>{SPAD.role} · pushes {SPAD.push}</div>
+              </div>
+              <div style={{ width:24,height:24,borderRadius:"50%",background:"#0d1a23",border:`1px solid ${C.blue}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:C.blue }}>{SPAD.initials}</div>
+            </div>
+          </div>
+
+          {/* BODY */}
+          <div style={{ display:"flex",flex:1,overflow:"hidden" }}>
+            {/* LEFT */}
+            <div style={{ width:185,background:"#090e09",borderRight:`1px solid ${C.border}`,padding:14,flexShrink:0,display:"flex",flexDirection:"column",overflowY:"auto" }}>
+              <div style={{ fontSize:8,letterSpacing:3,color:C.faint,marginBottom:8 }}>BUDGETS</div>
+              <Bar label="ADMIN"     value={res.adminBudget}     color={C.budget} />
+              <Bar label="CAPITAL"   value={res.capitalBudget}   color={C.dim} dim />
+              <div style={{ fontSize:7,color:C.faint,marginTop:-4,marginBottom:8,fontStyle:"italic" }}>for office investment (soon)</div>
+              <Bar label="PROGRAMME" value={res.programmeBudget} color={C.budget} />
+              <div style={{ fontSize:8,letterSpacing:3,color:C.faint,marginBottom:8,marginTop:8 }}>STANDING</div>
+              <Bar label="CONFIDENCE"   value={res.confidence} color={C.conf}  />
+              <Bar label="PUBLIC TRUST" value={res.trust}      color={C.trust} />
+              <div style={{ marginTop:14 }}>
+                <div style={{ fontSize:8,letterSpacing:3,color:C.faint,marginBottom:8 }}>RECESS DEADLINE</div>
+                <div style={{ height:4,background:"#182818",borderRadius:2,overflow:"hidden",marginBottom:5 }}>
+                  <div style={{ height:"100%",width:`${(day/TOTAL_DAYS)*100}%`,background:daysLeft<14?C.red:"#7e44ad",borderRadius:2,transition:"width 0.4s" }} />
+                </div>
+                <div style={{ fontSize:9,color:C.dim }}>6 Jan → 28 Mar 2025</div>
+              </div>
+              <div style={{ marginTop:16 }}>
+                <div style={{ fontSize:8,letterSpacing:3,color:C.faint,marginBottom:8 }}>ACTIONS</div>
+                {activeLocum ? (
+                  <div style={{ padding:"8px 10px",background:"#2a1f08",border:`1px solid ${C.amber}`,borderRadius:3 }}>
+                    <div style={{ fontSize:10,color:C.amber,marginBottom:3 }}>LOCUM ACTIVE</div>
+                    <div style={{ fontSize:8,color:C.dim,lineHeight:1.5 }}>Departs in {activeLocum.expires - day}d.</div>
+                  </div>
+                ) : (
+                  <button onClick={requestCounsel} disabled={res.adminBudget < LOCUM_COST || gameOver} style={{ width:"100%",padding:"8px 10px",background:res.adminBudget>=LOCUM_COST?C.faint:"#1a1a0a",border:`1px solid ${res.adminBudget>=LOCUM_COST?C.green:C.faint}`,color:res.adminBudget>=LOCUM_COST?C.green:C.faint,cursor:res.adminBudget>=LOCUM_COST?"pointer":"not-allowed",fontFamily:C.mono,fontSize:10,textAlign:"left",letterSpacing:1 }}>
+                    REQUEST COUNSEL
+                    <div style={{ fontSize:8,color:C.dim,marginTop:3,lineHeight:1.4,letterSpacing:0 }}>−{LOCUM_COST} Admin Budget<br/>+1 Lawyer for {LOCUM_DURATION}d</div>
+                  </button>
+                )}
+              </div>
+              {selPol && !gameOver && (
+                <div style={{ marginTop:16,padding:10,background:"#0c150c",border:`1px solid ${C.border}`,borderRadius:3 }}>
+                  <div style={{ fontSize:8,letterSpacing:3,color:C.faint,marginBottom:6 }}>SELECTED</div>
+                  <div style={{ fontSize:10,color:C.text,lineHeight:1.4,marginBottom:5 }}>{selPol.name}</div>
+                  {selPol.condition ? <div style={{ fontSize:8,color:selPol.condition.color,marginBottom:5 }}>{selPol.condition.label}</div> : <div style={{ fontSize:8,color:C.dim,marginBottom:5 }}>Business as usual</div>}
+                  <div style={{ fontSize:9,color:C.dim,marginBottom:5 }}>{STAGES[selPol.stage]}</div>
+                  <div style={{ fontSize:8,color:C.faint,marginBottom:4 }}>
+                    Submissions: <span style={{ color:selPol.submissions.development?C.green:C.dim }}>{selPol.submissions.development||"dev pending"}</span>
+                    {" / "}
+                    <span style={{ color:selPol.submissions.signoff?C.green:C.dim }}>{selPol.submissions.signoff||"S-O pending"}</span>
+                  </div>
+                  {selPol.awaitingHMT && (<div style={{ fontSize:8,color:C.amber }}>⏳ Awaiting HMT response</div>)}
+                </div>
+              )}
+            </div>
+
+            {/* CENTRE */}
+            <div style={{ flex:1,padding:14,overflowY:"auto" }}>
+              {gameOver ? (
+                <div style={{ display:"flex",alignItems:"center",justifyContent:"center",height:"100%",textAlign:"center" }}>
+                  <div style={{ maxWidth:420 }}>
+                    <div style={{ fontSize:17,letterSpacing:3,marginBottom:16,color:outcome==="won"?C.green:C.red }}>
+                      {outcome==="won"?"PERFORMANCE REVIEW: OUTSTANDING":"PERFORMANCE REVIEW: UNSATISFACTORY"}
+                    </div>
+                    <div style={{ fontSize:12,color:C.dim,lineHeight:2,marginBottom:26,fontStyle:"italic" }}>"{outcomeMsg}"</div>
+                    <button onClick={()=>set(init())} style={{ padding:"8px 22px",background:C.faint,border:`1px solid ${C.green}`,color:C.green,cursor:"pointer",fontFamily:C.mono,fontSize:11,letterSpacing:2 }}>NEW POSTING</button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {spadNotifs.length > 0 && (
+                    <div style={{ marginBottom:12 }}>
+                      <div style={{ fontSize:8,letterSpacing:3,color:C.faint,marginBottom:8 }}>SPAD MESSAGES</div>
+                      {spadNotifs.map(n => (<SpadCard key={n.id} notif={n} policies={policies} onChoose={onSpadChoose} />))}
+                    </div>
+                  )}
+                  <LiveStrip livePortfolio={livePortfolio} staff={staff} />
+                  <div style={{ fontSize:8,letterSpacing:3,color:C.faint,marginBottom:10 }}>POLICY INBOX ({policies.length} active)</div>
+                  <div style={{ display:"flex",flexDirection:"column",gap:10 }}>
+                    {policies.map(pol => {
+                      const assigned = staff.filter(st => st.assignments.some(a => a.policyId === pol.id));
+                      const isSel    = selected === pol.id;
+                      const essT     = essentialType(pol, pol.stage);
+                      const subPend  = needsSubmission(pol);
+                      return (
+                        <div key={pol.id} onClick={()=>selectPolicy(pol.id)} style={{ padding:"11px 13px",cursor:"pointer",borderRadius:3,background:isSel?"#131f13":"#0c140c",border:`1px solid ${isSel?C.green:C.border}`,borderLeft:`3px solid ${pol.condition?pol.condition.color:C.faint}` }}>
+                          <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:2 }}>
+                            <div style={{ flex:1,marginRight:10 }}>
+                              <div style={{ fontSize:12,color:C.text,fontWeight:"bold",marginBottom:3 }}>{pol.name}</div>
+                              {pol.condition ? <span style={{ fontSize:8,color:pol.condition.color,letterSpacing:1 }}>{pol.condition.label}</span> : <span style={{ fontSize:8,color:C.dim,letterSpacing:1 }}>Business as usual</span>}
+                              {pol.consulted && <span style={{ fontSize:8,color:C.green,marginLeft:8 }}>✓ consulted</span>}
+                              {subPend && <span style={{ fontSize:8,color:C.purple,marginLeft:8 }}>📝 awaiting submission</span>}
+                              {pol.awaitingHMT && <span style={{ fontSize:8,color:C.amber,marginLeft:8 }}>⏳ HMT review</span>}
+                            </div>
+                            <div style={{ display:"flex",gap:3,flexWrap:"wrap",justifyContent:"flex-end",flexShrink:0,maxWidth:160 }}>
+                              {assigned.map(w => {
+                                const a   = w.assignments.find(x => x.policyId === pol.id);
+                                const inT = a.transit > 0;
+                                const ess = w.type === essT;
+                                const sup = a.isSupport === true;
+                                const shd = w.type === "Policy Officer" && !ess && !sup;
+                                return (
+                                  <span key={w.id} style={{ fontSize:8,padding:"2px 5px",borderRadius:2,background:inT?"#2a1f08":ess||sup?"#0d2318":shd?"#0d1a23":"#2d1010",color:inT?C.amber:ess||sup?C.green:shd?C.blue:C.red,border:`1px solid ${inT?C.amber+"40":ess||sup?C.green+"40":shd?C.blue+"40":C.red+"40"}`,whiteSpace:"nowrap" }}>
+                                    {w.initials}{inT?` ↗${a.transit}d`:ess?" ●":sup?" ◐":shd?" ○":" ⚠"}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          </div>
+                          <Pipeline policy={pol} staff={staff} />
+                          {isSel && (
+                            <div style={{ marginTop:8 }}>
+                              {pol.condition && (<div style={{ fontSize:9,color:C.dim,fontStyle:"italic",lineHeight:1.5,marginBottom:5 }}>{pol.condition.desc}</div>)}
+                              <div style={{ fontSize:8,color:C.faint }}>
+                                <span style={{ color:C.green }}>●</span> essential · <span style={{ color:C.green }}>◐</span> support (½) · <span style={{ color:C.blue }}>○</span> shadowing (PO)
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* RIGHT */}
+            <div style={{ width:225,borderLeft:`1px solid ${C.border}`,display:"flex",flexDirection:"column" }}>
+              <div style={{ flex:1,padding:14,overflowY:"auto" }}>
+                <div style={{ fontSize:8,letterSpacing:3,color:C.faint,marginBottom:10 }}>{selected?"STAFF — click to assign / unassign":"STAFF ROSTER"}</div>
+                {staff.map(st => {
+                  const load       = staffLoad(st, policies);
+                  const cap        = CAPACITY[st.type];
+                  const pct        = (load/cap)*100;
+                  const onSel      = selected && st.assignments.some(a => a.policyId === selected);
+                  const wouldBlock = selPol && !onSel && st.type !== essentialType(selPol, selPol.stage) && st.type !== "Policy Officer";
+                  const wouldOver  = selPol && !onSel && load + assignmentWeight(st.type, selPol) > cap;
+                  const disabled   = wouldBlock || wouldOver;
+                  return (
+                    <div key={st.id} onClick={()=>selected&&!gameOver&&!disabled&&handleStaffClick(st.id)} style={{ padding:"8px 10px",marginBottom:7,borderRadius:3,cursor:selected&&!disabled?"pointer":"default",background:onSel?"#182e18":st.isLocum?"#1f1a08":"#0c140c",border:`1px solid ${onSel?C.green:st.isLocum?C.amber+"60":disabled&&selected?"#3a1515":C.border}`,opacity:disabled&&selected?0.5:1 }}>
+                      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5 }}>
+                        <div>
+                          <div style={{ fontSize:10,color:C.text }}>{st.name}{st.isLocum && <span style={{ fontSize:8,color:C.amber,marginLeft:5 }}>(locum)</span>}</div>
+                          <div style={{ fontSize:8,color:C.dim,marginTop:1 }}>{st.type}{st.isLocum&&` · departs ${st.expires-day}d`}</div>
+                        </div>
+                        <div style={{ width:24,height:24,borderRadius:"50%",background:onSel?C.faint:"#131f13",border:`1px solid ${onSel?C.green:st.isLocum?C.amber+"60":C.faint}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:st.isLocum?C.amber:C.green,flexShrink:0 }}>{st.initials}</div>
+                      </div>
+                      <div style={{ display:"flex",justifyContent:"space-between",fontSize:7,color:C.faint,marginBottom:2 }}><span>load</span><span style={{ color:pct>=90?C.red:C.dim }}>{load.toFixed(1)}/{cap}</span></div>
+                      <div style={{ height:3,background:"#182818",borderRadius:1,marginBottom:5,overflow:"hidden" }}><div style={{ height:"100%",width:`${Math.min(100,pct)}%`,background:pct>=90?C.red:pct>=60?C.amber:C.green,borderRadius:1,transition:"width 0.3s" }} /></div>
+                      {st.assignments.length === 0 ? (
+                        <div style={{ fontSize:8,color:C.faint }}>Available</div>
+                      ) : (
+                        <div style={{ display:"flex",flexDirection:"column",gap:1 }}>
+                          {st.assignments.map(a => {
+                            const ap = policies.find(p => p.id === a.policyId) || (a.isMonitoring ? livePortfolio.find(lp => lp.id === a.policyId) : null);
+                            const name = ap?.name || (a.isMonitoring ? "(live policy)" : "");
+                            if (!name) return null;
+                            const inT = a.transit > 0;
+                            const mon = a.isMonitoring;
+                            const sup = a.isSupport && !mon;
+                            const shd = st.type==="Policy Officer" && !sup && !mon && ap && essentialType(ap,ap.stage)!=="Policy Officer";
+                            return (
+                              <div key={a.policyId} style={{ fontSize:8,lineHeight:1.4,color:inT?C.amber:mon?"#4a4a8a":sup?C.green:shd?C.blue:C.green }}>
+                                {inT?"↗":mon?"👁":sup?"◐":shd?"○":"●"}{" "}{name.length>23?name.slice(0,23)+"…":name}{inT&&` (${a.transit}d)`}{mon&&" (monitoring)"}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {wouldBlock&&selected&&!onSel&&(<div style={{ fontSize:8,color:C.red,marginTop:4 }}>Not essential for {STAGES[selPol.stage]}</div>)}
+                      {wouldOver&&!wouldBlock&&selected&&!onSel&&(<div style={{ fontSize:8,color:C.red,marginTop:4 }}>At capacity</div>)}
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ borderTop:`1px solid ${C.border}`,padding:"10px 12px",maxHeight:200,overflowY:"auto",background:"#070d07" }}>
+                <div style={{ fontSize:8,letterSpacing:3,color:C.faint,marginBottom:8 }}>DEPARTMENTAL LOG</div>
+                {log.map((e,i) => (
+                  <div key={i} style={{ display:"flex",gap:6,marginBottom:5,alignItems:"flex-start" }}>
+                    {e.tag && <span style={{ fontSize:8,flexShrink:0,whiteSpace:"nowrap",color:e.type==="success"?C.green:e.type==="warn"?C.red:C.amber }}>{e.tag}</span>}
+                    <span style={{ fontSize:9,lineHeight:1.5,color:e.type==="success"?C.green:e.type==="warn"?C.red:e.type==="event"?C.amber:e.type==="intro"?C.green:C.dim }}>{e.text}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* MODALS */}
+          {activeModal?.type==="routing" && (<RoutingModal policy={modalPol} staff={staff} policies={policies} kind={activeModal.kind} onConfirm={onRoutingConfirm} />)}
+          {activeModal?.type==="submission" && (<SubmissionModal policy={modalPol} stage={activeModal.stage} onSubmit={onSubmissionChoose} />)}
+          {activeModal?.type==="htmResponse" && (<HTMModal modal={activeModal} policy={modalPol} onConfirm={onHTMConfirm} />)}
+          {activeModal?.type==="meeting" && (<MeetingModal policies={policies} res={res} completed={completed} onClose={onMeetingClose} />)}
+          {activeModal?.type==="steer" && (<SteerModal modal={activeModal} policies={policies} onChoose={onSteerChoose} />)}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<Whitehall />);
+  </script>
+</body>
+</html>
